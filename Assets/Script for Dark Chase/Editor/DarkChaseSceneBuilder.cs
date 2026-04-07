@@ -23,28 +23,92 @@ public static class DarkChaseSceneBuilder
         // ── Volume Profile ──
         var profile = CreateVolumeProfile();
 
-        // ── Corridor ──
+        // ── Corridor (Subway FBX) ──
         var corridorRoot = new GameObject("Corridor");
-        var darkMat = CreateDarkMaterial();
 
-        BuildHallwaySegment("HallwaySegmentA", 0f, darkMat, corridorRoot.transform);
-        BuildHallwaySegment("HallwaySegmentB", 20f, darkMat, corridorRoot.transform);
+        string fbxPath = "Assets/Art/Subway Scene.fbx";
+        var fbxAsset = AssetDatabase.LoadAssetAtPath<GameObject>(fbxPath);
+        if (fbxAsset == null)
+        {
+            Debug.LogError($"Could not find FBX at {fbxPath}!");
+            return;
+        }
+
+        // Instantiate first, measure raw bounds, then auto-rotate so longest axis = Z
+        var segA = (GameObject)PrefabUtility.InstantiatePrefab(fbxAsset);
+        segA.name = "SubwaySegmentA";
+        segA.transform.SetParent(corridorRoot.transform);
+        segA.transform.position = Vector3.zero;
+        segA.transform.rotation = Quaternion.identity;
+
+        Bounds rawBounds = GetFullBounds(segA);
+        Debug.Log($"Subway RAW bounds — size: {rawBounds.size}");
+
+        // Auto-detect rotation: find which axis is longest and rotate it to Z
+        Quaternion autoRotation = Quaternion.identity;
+        if (rawBounds.size.x > rawBounds.size.z && rawBounds.size.x > rawBounds.size.y)
+            autoRotation = Quaternion.Euler(0f, 90f, 0f); // X is longest -> rotate to Z
+        else if (rawBounds.size.y > rawBounds.size.z && rawBounds.size.y > rawBounds.size.x)
+            autoRotation = Quaternion.Euler(0f, 0f, 90f); // Y is longest -> rotate to Z
+
+        segA.transform.rotation = autoRotation;
+
+        // Add MeshColliders to all mesh children
+        AddMeshColliders(segA);
+
+        // Measure model bounds after rotation
+        Bounds fullBounds = GetFullBounds(segA);
+        float corridorLength = fullBounds.size.z;
+        float floorY = fullBounds.min.y + 0.1f;
+        float ceilingY = fullBounds.max.y;
+        float centerX = fullBounds.center.x;
+        float boundsMinZ = fullBounds.min.z;
+
+        Debug.Log($"Subway ROTATED bounds — size: {fullBounds.size}, min: {fullBounds.min}, max: {fullBounds.max}, rotation: {autoRotation.eulerAngles}");
+
+        var segB = (GameObject)PrefabUtility.InstantiatePrefab(fbxAsset);
+        segB.name = "SubwaySegmentB";
+        segB.transform.SetParent(corridorRoot.transform);
+        segB.transform.rotation = autoRotation;
+        segB.transform.position = new Vector3(0f, 0f, boundsMinZ + corridorLength);
+        AddMeshColliders(segB);
+
+        // Add flickering lights inside the car
+        for (int i = 0; i < 3; i++)
+        {
+            float z = boundsMinZ + corridorLength * (i + 1) / 4f;
+            var ceilLightGO = new GameObject($"CeilingLight_{i}");
+            ceilLightGO.transform.SetParent(corridorRoot.transform);
+            ceilLightGO.transform.position = new Vector3(centerX, ceilingY - 0.3f, z);
+            var ceilLight = ceilLightGO.AddComponent<Light>();
+            ceilLight.type = LightType.Spot;
+            ceilLight.range = 5f;
+            ceilLight.intensity = 20f;
+            ceilLight.spotAngle = 90f;
+            ceilLight.color = new Color(1f, 0.95f, 0.8f);
+            ceilLightGO.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            var flicker = ceilLightGO.AddComponent<DarkChaseLightFlicker>();
+            SetPrivateSerializedField(flicker, "targetLight", ceilLight);
+        }
+
+        // StartAnchor and EndTrigger inside the car
+        float spawnZ = boundsMinZ + 1f;
 
         var startAnchor = new GameObject("StartAnchor");
         startAnchor.transform.SetParent(corridorRoot.transform);
-        startAnchor.transform.position = new Vector3(0f, 0f, 1f);
+        startAnchor.transform.position = new Vector3(centerX, floorY, spawnZ);
 
         var endTrigger = new GameObject("EndTrigger");
         endTrigger.transform.SetParent(corridorRoot.transform);
-        endTrigger.transform.position = new Vector3(0f, 0f, 20f);
+        endTrigger.transform.position = new Vector3(centerX, floorY, boundsMinZ + corridorLength);
         var triggerBox = endTrigger.AddComponent<BoxCollider>();
         triggerBox.isTrigger = true;
-        triggerBox.center = new Vector3(0f, 1.5f, 0f);
-        triggerBox.size = new Vector3(5f, 4f, 1f);
+        triggerBox.center = new Vector3(0f, (ceilingY - floorY) / 2f, 0f);
+        triggerBox.size = new Vector3(fullBounds.size.x, ceilingY - floorY, 1f);
 
         // ── Player Rig ──
         var player = new GameObject("Player");
-        player.transform.position = new Vector3(0f, 0f, 2f);
+        player.transform.position = new Vector3(centerX, floorY, spawnZ);
         player.layer = 0;
 
         var cc = player.AddComponent<CharacterController>();
@@ -84,7 +148,7 @@ public static class DarkChaseSceneBuilder
         var loopScript = endTrigger.AddComponent<DarkChaseCorridorLoop>();
         SetPrivateSerializedField(loopScript, "player", player.transform);
         SetPrivateSerializedField(loopScript, "startAnchor", startAnchor.transform);
-        SetPrivateSerializedField(loopScript, "corridorLength", 20f);
+        SetPrivateSerializedField(loopScript, "corridorLength", corridorLength);
 
         // ── Audio Manager ──
         var audioManagerGO = new GameObject("AudioManager");
@@ -188,84 +252,23 @@ public static class DarkChaseSceneBuilder
         return profile;
     }
 
-    static Material CreateDarkMaterial()
+    static void AddMeshColliders(GameObject go)
     {
-        var shader = Shader.Find("Universal Render Pipeline/Lit");
-        var mat = new Material(shader);
-        mat.SetColor("_BaseColor", new Color(0.1f, 0.1f, 0.1f, 1f));
-        mat.SetFloat("_Smoothness", 0.2f);
-        mat.SetFloat("_Metallic", 0f);
-
-        string dir = "Assets/Material";
-        if (!AssetDatabase.IsValidFolder(dir))
-            AssetDatabase.CreateFolder("Assets", "Material");
-
-        AssetDatabase.CreateAsset(mat, "Assets/Material/DarkChaseConcrete.mat");
-        AssetDatabase.SaveAssets();
-        return mat;
+        foreach (var mf in go.GetComponentsInChildren<MeshFilter>())
+        {
+            if (mf.GetComponent<Collider>() == null)
+                mf.gameObject.AddComponent<MeshCollider>();
+        }
     }
 
-    static void BuildHallwaySegment(string name, float zOffset, Material mat, Transform parent)
+    static Bounds GetFullBounds(GameObject go)
     {
-        float length = 20f;
-        float width = 4f;
-        float height = 3f;
-
-        var segment = new GameObject(name);
-        segment.transform.SetParent(parent);
-        segment.transform.position = new Vector3(0f, 0f, zOffset);
-
-        // Floor
-        var floor = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        floor.name = "Floor";
-        floor.transform.SetParent(segment.transform);
-        floor.transform.localPosition = new Vector3(0f, 0f, length / 2f);
-        floor.transform.localScale = new Vector3(width, 0.1f, length);
-        floor.GetComponent<Renderer>().sharedMaterial = mat;
-
-        // Ceiling
-        var ceiling = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        ceiling.name = "Ceiling";
-        ceiling.transform.SetParent(segment.transform);
-        ceiling.transform.localPosition = new Vector3(0f, height, length / 2f);
-        ceiling.transform.localScale = new Vector3(width, 0.1f, length);
-        ceiling.GetComponent<Renderer>().sharedMaterial = mat;
-
-        // Left wall
-        var wallL = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        wallL.name = "WallLeft";
-        wallL.transform.SetParent(segment.transform);
-        wallL.transform.localPosition = new Vector3(-width / 2f, height / 2f, length / 2f);
-        wallL.transform.localScale = new Vector3(0.1f, height, length);
-        wallL.GetComponent<Renderer>().sharedMaterial = mat;
-
-        // Right wall
-        var wallR = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        wallR.name = "WallRight";
-        wallR.transform.SetParent(segment.transform);
-        wallR.transform.localPosition = new Vector3(width / 2f, height / 2f, length / 2f);
-        wallR.transform.localScale = new Vector3(0.1f, height, length);
-        wallR.GetComponent<Renderer>().sharedMaterial = mat;
-
-        // Flickering ceiling lights (3 per segment)
-        for (int i = 0; i < 3; i++)
-        {
-            float z = length * (i + 1) / 4f;
-            var lightGO = new GameObject($"CeilingLight_{i}");
-            lightGO.transform.SetParent(segment.transform);
-            lightGO.transform.localPosition = new Vector3(0f, height - 0.2f, z);
-
-            var light = lightGO.AddComponent<Light>();
-            light.type = LightType.Spot;
-            light.range = 5f;
-            light.intensity = 20f;
-            light.spotAngle = 90f;
-            light.color = new Color(1f, 0.95f, 0.8f);
-            lightGO.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-
-            var flicker = lightGO.AddComponent<DarkChaseLightFlicker>();
-            SetPrivateSerializedField(flicker, "targetLight", light);
-        }
+        var renderers = go.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0) return new Bounds(Vector3.zero, Vector3.one * 20f);
+        var bounds = renderers[0].bounds;
+        for (int i = 1; i < renderers.Length; i++)
+            bounds.Encapsulate(renderers[i].bounds);
+        return bounds;
     }
 
     static AudioSource CreateAudioSource(GameObject parent, string childName, bool loop, bool playOnAwake, float volume)
